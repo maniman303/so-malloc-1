@@ -53,7 +53,6 @@ static size_t chunksize = 0;
 static size_t mem_heap_high = 0;
 static block_t *heap_listp = NULL;
 
-// TODO - make smaller padding for size < 16
 static size_t round_up(size_t size) {
   return (size + ALIGNMENT - 1) & -ALIGNMENT;
 }
@@ -152,13 +151,10 @@ static void *find_fit(size_t size) {
 }
 
 static void *expand(size_t size) {
-  // printf("Expanding\n");
   void *ptr;
-  if (size > chunksize) {
-    chunksize = size << 1;
-  }
-
+  chunksize = size > chunksize ? size + (chunksize << 1) : chunksize;
   size_t diff = chunksize - size;
+
   if (diff >= 16) {
     ptr = mem_sbrk(chunksize);
     if ((long)ptr > 0) {
