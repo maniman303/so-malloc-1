@@ -155,7 +155,7 @@ static void *expand(size_t size) {
   // printf("Expanding\n");
   void *ptr;
   if (size > chunksize) {
-    chunksize = size + (chunksize << 1);
+    chunksize = size << 1;
   }
 
   size_t diff = chunksize - size;
@@ -199,7 +199,6 @@ void *malloc(size_t size) {
     return NULL;
 
   set_header_footer(block, size, true);
-  // set_footer(block, size, true);
 
   return block->payload;
 }
