@@ -49,6 +49,11 @@ typedef struct {
   uint8_t payload[];
 } block_t;
 
+static size_t chunksize = 0;
+static size_t mem_heap_high = 0;
+static block_t *heap_listp = NULL;
+
+// TODO - make smaller padding for size < 16
 static size_t round_up(size_t size) {
   return (size + ALIGNMENT - 1) & -ALIGNMENT;
 }
@@ -57,8 +62,44 @@ static size_t get_size(block_t *block) {
   return block->header & -2;
 }
 
-static void set_header(block_t *block, size_t size, bool is_allocated) {
-  block->header = size | is_allocated;
+static void set_header_footer(block_t *block, size_t size, bool is_allocated) {
+  int32_t val = size | is_allocated;
+  block->header = val;
+  size_t footer = (size_t)block + size - 4;
+  *(int32_t *)(footer) = val;
+}
+
+static int32_t get_header(block_t *block) {
+  return block->header;
+}
+
+static void *get_next_block(block_t *block) {
+  size_t size = get_size(block);
+  if ((long)(block) + size + 16 <= mem_heap_high) {
+    return (void *)((long)(block) + size);
+  }
+
+  return NULL;
+}
+
+static void *get_prev_block(block_t *block) {
+  if ((long)(block)-16 > (long)(heap_listp)) {
+    void *prev_block_footer = (void *)block - 4;
+    size_t size = get_size(prev_block_footer);
+
+    return (void *)((long)(block)-size);
+  }
+
+  return NULL;
+}
+
+static bool get_alloc(block_t *block) {
+  if (block == NULL) {
+    return true;
+  }
+
+  int32_t res = get_header(block) & 1;
+  return res > 0;
 }
 
 /*
@@ -66,10 +107,76 @@ static void set_header(block_t *block, size_t size, bool is_allocated) {
  */
 int mm_init(void) {
   /* Pad heap start so first payload is at ALIGNMENT. */
-  if ((long)mem_sbrk(ALIGNMENT - offsetof(block_t, payload)) < 0)
+  if ((long)mem_sbrk(ALIGNMENT - sizeof(block_t)) < 0)
     return -1;
 
+  size_t size = round_up(2);
+  heap_listp = mem_sbrk(size);
+  mem_heap_high = (long)heap_listp + size;
+
+  set_header_footer(heap_listp, size, false);
+
+  chunksize = 1 << 5; // 9
+
   return 0;
+}
+
+static void *find_fit(size_t size) {
+  block_t *fit_block = NULL;
+  block_t *work_block = heap_listp;
+  size_t fit_size = 0;
+  size_t work_size;
+
+  while ((work_block = get_next_block(work_block)) != NULL) {
+    if (!get_alloc(work_block)) {
+      work_size = get_size(work_block);
+      if (work_size >= size) {
+        if (fit_block == NULL || work_size < fit_size) {
+          fit_block = work_block;
+          fit_size = get_size(fit_block);
+        }
+      }
+    }
+  }
+
+  if (fit_block != NULL) {
+    size_t diff = fit_size - size;
+    if (diff >= 16) {
+      block_t *new_free = (block_t *)((long)fit_block + size);
+      set_header_footer(new_free, diff, false);
+      set_header_footer(fit_block, size, false);
+    }
+  }
+
+  return fit_block;
+}
+
+static void *expand(size_t size) {
+  // printf("Expanding\n");
+  void *ptr;
+  if (size > chunksize) {
+    chunksize = size + (chunksize << 1);
+  }
+
+  size_t diff = chunksize - size;
+  if (diff >= 16) {
+    ptr = mem_sbrk(chunksize);
+    if ((long)ptr > 0) {
+      mem_heap_high += chunksize;
+      set_header_footer(ptr + size, diff, false);
+
+      return ptr;
+    }
+  }
+
+  ptr = mem_sbrk(size);
+  if ((long)ptr > 0) {
+    mem_heap_high += size;
+
+    return ptr;
+  }
+
+  return (void *)(-1);
 }
 
 /*
@@ -77,13 +184,53 @@ int mm_init(void) {
  *      Always allocate a block whose size is a multiple of the alignment.
  */
 void *malloc(size_t size) {
-  size = round_up(sizeof(block_t) + size);
-  block_t *block = mem_sbrk(size);
+  size = round_up((2 * sizeof(block_t)) + size);
+  // printf("Malloc: %ld\n", size);
+  block_t *block;
+
+  if ((block = find_fit(size)) != NULL) {
+    size = get_size(block);
+    set_header_footer(block, size, true);
+    return block->payload;
+  }
+
+  block = expand(size);
   if ((long)block < 0)
     return NULL;
 
-  set_header(block, size, true);
+  set_header_footer(block, size, true);
+  // set_footer(block, size, true);
+
   return block->payload;
+}
+
+static void *coalesce(block_t *block) {
+  block_t *prev_block = get_prev_block(block);
+  block_t *next_block = get_next_block(block);
+  bool prev_alloc = get_alloc(prev_block);
+  bool next_alloc = get_alloc(next_block);
+  size_t size = get_size(block);
+
+  if (prev_alloc && next_alloc) {
+    // printf("No coalescing\n");
+    return block;
+  } else if (prev_alloc && !next_alloc) {
+    // printf("Coalescing right\n");
+    size += get_size(next_block);
+    set_header_footer(block, size, false);
+  } else if (!prev_alloc && next_alloc) {
+    // printf("Coalescing left\n");
+    size += get_size(prev_block);
+    block = prev_block;
+    set_header_footer(block, size, false);
+  } else {
+    // printf("Coalescing both\n");
+    size += get_size(next_block) + get_size(prev_block);
+    block = prev_block;
+    set_header_footer(block, size, false);
+  }
+
+  return block;
 }
 
 /*
@@ -91,6 +238,15 @@ void *malloc(size_t size) {
  *      Computers have big memories; surely it won't be a problem.
  */
 void free(void *ptr) {
+  if (ptr != NULL) {
+    block_t *block = ptr - sizeof(block_t);
+    size_t size = get_size(block);
+
+    set_header_footer(block, size, false);
+    // set_footer(block, size, false);
+
+    block = coalesce(block);
+  }
 }
 
 /*
