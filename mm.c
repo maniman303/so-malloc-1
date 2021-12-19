@@ -64,7 +64,7 @@ static size_t get_size(block_t *block) {
 static void set_header_footer(block_t *block, size_t size, bool is_allocated) {
   int32_t val = size | is_allocated;
   block->header = val;
-  size_t footer = (size_t)block + size - 4;
+  size_t footer = (size_t)block + size - sizeof(block_t);
   *(int32_t *)(footer) = val;
 }
 
@@ -83,7 +83,7 @@ static void *get_next_block(block_t *block) {
 
 static void *get_prev_block(block_t *block) {
   if ((long)(block)-16 > (long)(heap_listp)) {
-    void *prev_block_footer = (void *)block - 4;
+    void *prev_block_footer = (void *)block - sizeof(block_t);
     size_t size = get_size(prev_block_footer);
 
     return (void *)((long)(block)-size);
@@ -115,7 +115,7 @@ int mm_init(void) {
 
   set_header_footer(heap_listp, size, false);
 
-  chunksize = 1 << 7; // 9
+  chunksize = 1 << 7;
 
   return 0;
 }
@@ -261,8 +261,7 @@ static bool try_expand(void *block, size_t size) {
     set_header_footer(block, size, true);
 
     return true;
-  }
-  else if (!next_alloc) {
+  } else if (!next_alloc) {
     size_t next_size = get_size(next_block);
     if (csize + next_size >= size) {
       size_t diff = csize + next_size - size;
