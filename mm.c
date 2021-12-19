@@ -98,7 +98,7 @@ static bool get_alloc(block_t *block) {
   }
 
   int32_t res = get_header(block) & 1;
-  return res > 0;
+  return res;
 }
 
 /*
@@ -115,7 +115,7 @@ int mm_init(void) {
 
   set_header_footer(heap_listp, size, false);
 
-  chunksize = 1 << 5; // 9
+  chunksize = 1 << 7; // 9
 
   return 0;
 }
@@ -132,7 +132,7 @@ static void *find_fit(size_t size) {
       if (work_size >= size) {
         if (fit_block == NULL || work_size < fit_size) {
           fit_block = work_block;
-          fit_size = get_size(fit_block);
+          fit_size = work_size;
         }
       }
     }
@@ -143,16 +143,17 @@ static void *find_fit(size_t size) {
     if (diff >= 16) {
       block_t *new_free = (block_t *)((long)fit_block + size);
       set_header_footer(new_free, diff, false);
-      set_header_footer(fit_block, size, false);
     }
+
+    set_header_footer(fit_block, size, true);
   }
 
   return fit_block;
 }
 
-static void *expand(size_t size) {
+static void *increase(size_t size) {
   void *ptr;
-  chunksize = size > chunksize ? size + (chunksize << 1) : chunksize;
+  chunksize = size > chunksize ? size : chunksize;
   size_t diff = chunksize - size;
 
   if (diff >= 16) {
@@ -185,12 +186,10 @@ void *malloc(size_t size) {
   block_t *block;
 
   if ((block = find_fit(size)) != NULL) {
-    size = get_size(block);
-    set_header_footer(block, size, true);
     return block->payload;
   }
 
-  block = expand(size);
+  block = increase(size);
   if ((long)block < 0)
     return NULL;
 
@@ -244,6 +243,41 @@ void free(void *ptr) {
   }
 }
 
+// ptr must be a block, not payload
+static bool try_expand(void *block, size_t size) {
+  size_t csize = get_size(block);
+
+  if (csize - (2 * sizeof(block_t)) >= size) {
+    return true;
+  }
+
+  block_t *next_block = get_next_block(block);
+  bool next_alloc = get_alloc(next_block);
+  size = round_up(size + (2 * sizeof(block_t)));
+  (void)next_alloc;
+
+  if (next_block == NULL) {
+    increase(size - csize);
+    set_header_footer(block, size, true);
+
+    return true;
+  }
+  else if (!next_alloc) {
+    size_t next_size = get_size(next_block);
+    if (csize + next_size >= size) {
+      size_t diff = csize + next_size - size;
+      if (diff >= 16) {
+        set_header_footer(block + size, diff, false);
+      }
+
+      set_header_footer(block, size + diff, true);
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /*
  * realloc - Change the size of the block by mallocing a new block,
  *      copying its data, and freeing the old block.
@@ -258,6 +292,10 @@ void *realloc(void *old_ptr, size_t size) {
   /* If old_ptr is NULL, then this is just malloc. */
   if (!old_ptr)
     return malloc(size);
+
+  if (try_expand(old_ptr - sizeof(block_t), size)) {
+    return old_ptr;
+  }
 
   void *new_ptr = malloc(size);
 
