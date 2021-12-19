@@ -1,13 +1,7 @@
-/*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
- *
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  Blocks are never coalesced or reused.  The size of
- * a block is found at the first aligned word before the block (we need
- * it for realloc).
- *
- * This code is correct and blazingly fast, but very bad usage-wise since
- * it never frees anything.
+/* Michał Wójtowicz 308248 oświadczam że jestem jedynym autorem kodu źrodłowego.
+W swoim rozwiązaniu zawarłem adaptację częściowego rozwiązania z książki
+CSAPP 9.9. Zaimplementowałem z wykorzystaniem boundary tags metodę best fit z
+gorliwym kompaktowaniem wolnych bloków podczas free.
  */
 #include <assert.h>
 #include <stdio.h>
@@ -53,6 +47,8 @@ static size_t chunksize = 0;
 static size_t mem_heap_high = 0;
 static block_t *heap_listp = NULL;
 
+static inline void *coalesce(block_t *);
+
 static size_t round_up(size_t size) {
   return (size + ALIGNMENT - 1) & -ALIGNMENT;
 }
@@ -61,18 +57,19 @@ static size_t get_size(block_t *block) {
   return block->header & -2;
 }
 
-static void set_header_footer(block_t *block, size_t size, bool is_allocated) {
+static inline void set_header_footer(block_t *block, size_t size,
+                                     bool is_allocated) {
   int32_t val = size | is_allocated;
   block->header = val;
   size_t footer = (size_t)block + size - sizeof(block_t);
   *(int32_t *)(footer) = val;
 }
 
-static int32_t get_header(block_t *block) {
+static inline int32_t get_header(block_t *block) {
   return block->header;
 }
 
-static void *get_next_block(block_t *block) {
+static inline void *get_next_block(block_t *block) {
   size_t size = get_size(block);
   if ((long)(block) + size + 16 <= mem_heap_high) {
     return (void *)((long)(block) + size);
@@ -81,7 +78,7 @@ static void *get_next_block(block_t *block) {
   return NULL;
 }
 
-static void *get_prev_block(block_t *block) {
+static inline void *get_prev_block(block_t *block) {
   if ((long)(block)-16 > (long)(heap_listp)) {
     void *prev_block_footer = (void *)block - sizeof(block_t);
     size_t size = get_size(prev_block_footer);
@@ -92,7 +89,7 @@ static void *get_prev_block(block_t *block) {
   return NULL;
 }
 
-static bool get_alloc(block_t *block) {
+static inline bool get_alloc(block_t *block) {
   if (block == NULL) {
     return true;
   }
@@ -101,6 +98,7 @@ static bool get_alloc(block_t *block) {
   return res;
 }
 
+// Częściowa adaptacja rozwiązania z CSAPP
 /*
  * mm_init - Called when a new trace starts.
  */
@@ -120,26 +118,29 @@ int mm_init(void) {
   return 0;
 }
 
-static void *find_fit(size_t size) {
+// Best fit - szuka najmniejszego wolnego i pasującego bloku
+static inline void *find_fit(size_t size) {
   block_t *fit_block = NULL;
-  block_t *work_block = heap_listp;
+  block_t *work_block = get_next_block(heap_listp);
   size_t fit_size = 0;
   size_t work_size;
 
-  while ((work_block = get_next_block(work_block)) != NULL) {
+  while (work_block != NULL) {
     if (!get_alloc(work_block)) {
       work_size = get_size(work_block);
-      if (work_size >= size) {
-        if (fit_block == NULL || work_size < fit_size) {
-          fit_block = work_block;
-          fit_size = work_size;
-        }
+
+      if (work_size >= size && (fit_block == NULL || work_size < fit_size)) {
+        fit_block = work_block;
+        fit_size = work_size;
       }
     }
+
+    work_block = get_next_block(work_block);
   }
 
   if (fit_block != NULL) {
     size_t diff = fit_size - size;
+
     if (diff >= 16) {
       block_t *new_free = (block_t *)((long)fit_block + size);
       set_header_footer(new_free, diff, false);
@@ -151,13 +152,14 @@ static void *find_fit(size_t size) {
   return fit_block;
 }
 
-static void *increase(size_t size) {
+static inline void *increase(size_t size) {
   void *ptr;
   chunksize = size > chunksize ? size : chunksize;
   size_t diff = chunksize - size;
 
   if (diff >= 16) {
     ptr = mem_sbrk(chunksize);
+
     if ((long)ptr > 0) {
       mem_heap_high += chunksize;
       set_header_footer(ptr + size, diff, false);
@@ -198,7 +200,8 @@ void *malloc(size_t size) {
   return block->payload;
 }
 
-static void *coalesce(block_t *block) {
+// Adaptacja rozwiązania z CSAPP
+static inline void *coalesce(block_t *block) {
   block_t *prev_block = get_prev_block(block);
   block_t *next_block = get_next_block(block);
   bool prev_alloc = get_alloc(prev_block);
@@ -206,19 +209,15 @@ static void *coalesce(block_t *block) {
   size_t size = get_size(block);
 
   if (prev_alloc && next_alloc) {
-    // printf("No coalescing\n");
     return block;
   } else if (prev_alloc && !next_alloc) {
-    // printf("Coalescing right\n");
     size += get_size(next_block);
     set_header_footer(block, size, false);
   } else if (!prev_alloc && next_alloc) {
-    // printf("Coalescing left\n");
     size += get_size(prev_block);
     block = prev_block;
     set_header_footer(block, size, false);
   } else {
-    // printf("Coalescing both\n");
     size += get_size(next_block) + get_size(prev_block);
     block = prev_block;
     set_header_footer(block, size, false);
@@ -228,8 +227,7 @@ static void *coalesce(block_t *block) {
 }
 
 /*
- * free - We don't know how to free a block.  So we ignore this call.
- *      Computers have big memories; surely it won't be a problem.
+ * free
  */
 void free(void *ptr) {
   if (ptr != NULL) {
@@ -237,41 +235,44 @@ void free(void *ptr) {
     size_t size = get_size(block);
 
     set_header_footer(block, size, false);
-    // set_footer(block, size, false);
 
     block = coalesce(block);
   }
 }
 
-// ptr must be a block, not payload
-static bool try_expand(void *block, size_t size) {
+// Próba rozszerzenia już zaalokowanej pamięci
+static inline bool try_expand(void *block, size_t size) {
   size_t csize = get_size(block);
 
+  // Sprawdza czy już zaalokowana pamięć razem z paddingiem nie jest
+  // wystarczająca
   if (csize - (2 * sizeof(block_t)) >= size) {
     return true;
   }
 
   block_t *next_block = get_next_block(block);
   bool next_alloc = get_alloc(next_block);
+  size_t next_size = next_alloc ? 0 : get_size(next_block);
   size = round_up(size + (2 * sizeof(block_t)));
-  (void)next_alloc;
 
+  // Sprawdza czy blok nie jest ostatni na liście - wtedy starczy poszerzyć
+  // stertę
+  // W przeciwnym wypadku sprawdza czy blok obok jest pusty i
+  // wystarczająco duży
   if (next_block == NULL) {
     increase(size - csize);
     set_header_footer(block, size, true);
 
     return true;
-  } else if (!next_alloc) {
-    size_t next_size = get_size(next_block);
-    if (csize + next_size >= size) {
-      size_t diff = csize + next_size - size;
-      if (diff >= 16) {
-        set_header_footer(block + size, diff, false);
-      }
+  } else if (!next_alloc && (csize + next_size >= size)) {
+    size_t diff = csize + next_size - size;
 
-      set_header_footer(block, size + diff, true);
-      return true;
+    if (diff >= 16) {
+      set_header_footer(block + size, diff, false);
     }
+
+    set_header_footer(block, size + diff, true);
+    return true;
   }
 
   return false;
@@ -292,6 +293,7 @@ void *realloc(void *old_ptr, size_t size) {
   if (!old_ptr)
     return malloc(size);
 
+  // Próba rozszerzenia już zaalokowanej pamięci
   if (try_expand(old_ptr - sizeof(block_t), size)) {
     return old_ptr;
   }
@@ -330,7 +332,20 @@ void *calloc(size_t nmemb, size_t size) {
 }
 
 /*
- * mm_checkheap - So simple, it doesn't need a checker!
+ * mm_checkheap - sprawdza czy nie ma obok siebie dwóch wolnych bloków
  */
 void mm_checkheap(int verbose) {
+  block_t *work_block = heap_listp;
+  bool prev_alloc = false;
+  bool work_alloc;
+
+  while ((work_block = get_next_block(work_block)) != NULL) {
+    work_alloc = get_alloc(work_block);
+
+    if (!prev_alloc && !work_alloc) {
+      exit(-1);
+    }
+
+    prev_alloc = work_alloc;
+  }
 }
